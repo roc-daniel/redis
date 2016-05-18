@@ -178,20 +178,22 @@ typedef long long mstime_t; /* millisecond time type. */
 
 /* Command flags. Please check the command table defined in the redis.c file
  * for more information about the meaning of every flag. */
-#define CMD_WRITE 1                   /* "w" flag */
-#define CMD_READONLY 2                /* "r" flag */
-#define CMD_DENYOOM 4                 /* "m" flag */
-#define CMD_NOT_USED_1 8              /* no longer used flag */
-#define CMD_ADMIN 16                  /* "a" flag */
-#define CMD_PUBSUB 32                 /* "p" flag */
-#define CMD_NOSCRIPT  64              /* "s" flag */
-#define CMD_RANDOM 128                /* "R" flag */
-#define CMD_SORT_FOR_SCRIPT 256       /* "S" flag */
-#define CMD_LOADING 512               /* "l" flag */
-#define CMD_STALE 1024                /* "t" flag */
-#define CMD_SKIP_MONITOR 2048         /* "M" flag */
-#define CMD_ASKING 4096               /* "k" flag */
-#define CMD_FAST 8192                 /* "F" flag */
+#define CMD_WRITE (1<<0)            /* "w" flag */
+#define CMD_READONLY (1<<1)         /* "r" flag */
+#define CMD_DENYOOM (1<<2)          /* "m" flag */
+#define CMD_MODULE (1<<3)           /* Command exported by module. */
+#define CMD_ADMIN (1<<4)            /* "a" flag */
+#define CMD_PUBSUB (1<<5)           /* "p" flag */
+#define CMD_NOSCRIPT (1<<6)         /* "s" flag */
+#define CMD_RANDOM (1<<7)           /* "R" flag */
+#define CMD_SORT_FOR_SCRIPT (1<<8)  /* "S" flag */
+#define CMD_LOADING (1<<9)          /* "l" flag */
+#define CMD_STALE (1<<10)           /* "t" flag */
+#define CMD_SKIP_MONITOR (1<<11)    /* "M" flag */
+#define CMD_ASKING (1<<12)          /* "k" flag */
+#define CMD_FAST (1<<13)            /* "F" flag */
+#define CMD_MODULE_GETKEYS (1<<14)  /* Use the modules getkeys interface. */
+#define CMD_MODULE_NO_CLUSTER (1<<15) /* Deny on Redis Cluster. */
 
 /* Defines related to the dump file format. To store 32 bits lengths for short
  * keys requires a lot of space, so we check the most significant 2 bits of
@@ -256,6 +258,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CLIENT_REPLY_SKIP (1<<24)  /* Don't send just this reply. */
 #define CLIENT_LUA_DEBUG (1<<25)  /* Run EVAL in debug mode. */
 #define CLIENT_LUA_DEBUG_SYNC (1<<26)  /* EVAL debugging without fork() */
+#define CLIENT_MODULE (1<<27) /* Non connected client used by some module. */
 
 /* Client block type (btype field in client structure)
  * if CLIENT_BLOCKED flag is set. */
@@ -487,7 +490,7 @@ typedef struct redisObject {
     _var.type = OBJ_STRING; \
     _var.encoding = OBJ_ENCODING_RAW; \
     _var.ptr = _ptr; \
-} while(0);
+} while(0)
 
 /* To improve the quality of the LRU approximation we take a set of keys
  * that are good candidate for eviction across freeMemoryIfNeeded() calls.
@@ -570,7 +573,6 @@ typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     int fd;                 /* Client socket. */
     redisDb *db;            /* Pointer to currently SELECTed DB. */
-    int dictid;             /* ID of the currently SELECTed DB. */
     robj *name;             /* As set by CLIENT SETNAME. */
     sds querybuf;           /* Buffer we use to accumulate client queries. */
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
@@ -725,6 +727,9 @@ struct redisServer {
     int cronloops;              /* Number of times the cron function run */
     char runid[CONFIG_RUN_ID_SIZE+1];  /* ID always different at every exec. */
     int sentinel_mode;          /* True if this instance is a Sentinel. */
+    /* Modules */
+    dict *moduleapi;            /* Exported APIs dictionary for modules. */
+    list *loadmodule_queue;     /* List of modules to load at startup. */
     /* Networking */
     int port;                   /* TCP listening port */
     int tcp_backlog;            /* TCP listen() backlog */
@@ -1085,10 +1090,17 @@ extern double R_Zero, R_PosInf, R_NegInf, R_Nan;
 extern dictType hashDictType;
 extern dictType replScriptCacheDictType;
 extern dictType keyptrDictType;
+extern dictType modulesDictType;
 
 /*-----------------------------------------------------------------------------
  * Functions prototypes
  *----------------------------------------------------------------------------*/
+
+/* Modules */
+void moduleInitModulesSystem(void);
+int moduleLoad(const char *path);
+void moduleLoadFromQueue(void);
+int *moduleGetCommandKeysViaAPI(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
 
 /* Utils */
 long long ustime(void);
@@ -1130,7 +1142,6 @@ void copyClientOutputBuffer(client *dst, client *src);
 void *dupClientReplyValue(void *o);
 void getClientsMaxBuffers(unsigned long *longest_output_list,
                           unsigned long *biggest_input_buffer);
-void formatPeerId(char *peerid, size_t peerid_len, char *ip, int port);
 char *getClientPeerId(client *client);
 sds catClientInfoString(sds s, client *client);
 sds getAllClientsInfoString(void);
@@ -1227,6 +1238,7 @@ int getLongFromObjectOrReply(client *c, robj *o, long *target, const char *msg);
 int checkType(client *c, robj *o, int type);
 int getLongLongFromObjectOrReply(client *c, robj *o, long long *target, const char *msg);
 int getDoubleFromObjectOrReply(client *c, robj *o, double *target, const char *msg);
+int getDoubleFromObject(robj *o, double *target);
 int getLongLongFromObject(robj *o, long long *target);
 int getLongDoubleFromObject(robj *o, long double *target);
 int getLongDoubleFromObjectOrReply(client *c, robj *o, long double *target, const char *msg);
@@ -1288,6 +1300,21 @@ unsigned long aofRewriteBufferSize(void);
 
 /* Sorted sets data type */
 
+/* Input flags. */
+#define ZADD_NONE 0
+#define ZADD_INCR (1<<0)    /* Increment the score instead of setting it. */
+#define ZADD_NX (1<<1)      /* Don't touch elements not already existing. */
+#define ZADD_XX (1<<2)      /* Only touch elements already exisitng. */
+
+/* Output flags. */
+#define ZADD_NOP (1<<3)     /* Operation not performed because of conditionals.*/
+#define ZADD_NAN (1<<4)     /* Only touch elements already exisitng. */
+#define ZADD_ADDED (1<<5)   /* The element was new and was added. */
+#define ZADD_UPDATED (1<<6) /* The element already existed, score updated. */
+
+/* Flags only used by the ZADD command but not by zsetAdd() API: */
+#define ZADD_CH (1<<16)      /* Return num of elements added or updated. */
+
 /* Struct to hold a inclusive/exclusive range spec by score comparison. */
 typedef struct {
     double min, max;
@@ -1310,11 +1337,29 @@ zskiplistNode *zslLastInRange(zskiplist *zsl, zrangespec *range);
 double zzlGetScore(unsigned char *sptr);
 void zzlNext(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
 void zzlPrev(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
+unsigned char *zzlFirstInRange(unsigned char *zl, zrangespec *range);
+unsigned char *zzlLastInRange(unsigned char *zl, zrangespec *range);
 unsigned int zsetLength(robj *zobj);
 void zsetConvert(robj *zobj, int encoding);
 void zsetConvertToZiplistIfNeeded(robj *zobj, size_t maxelelen);
 int zsetScore(robj *zobj, sds member, double *score);
 unsigned long zslGetRank(zskiplist *zsl, double score, sds o);
+int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore);
+long zsetRank(robj *zobj, sds ele, int reverse);
+int zsetDel(robj *zobj, sds ele);
+sds ziplistGetObject(unsigned char *sptr);
+int zslValueGteMin(double value, zrangespec *spec);
+int zslValueLteMax(double value, zrangespec *spec);
+void zslFreeLexRange(zlexrangespec *spec);
+int zslParseLexRange(robj *min, robj *max, zlexrangespec *spec);
+unsigned char *zzlFirstInLexRange(unsigned char *zl, zlexrangespec *range);
+unsigned char *zzlLastInLexRange(unsigned char *zl, zlexrangespec *range);
+zskiplistNode *zslFirstInLexRange(zskiplist *zsl, zlexrangespec *range);
+zskiplistNode *zslLastInLexRange(zskiplist *zsl, zlexrangespec *range);
+int zzlLexValueGteMin(unsigned char *p, zlexrangespec *spec);
+int zzlLexValueLteMax(unsigned char *p, zlexrangespec *spec);
+int zslLexValueGteMin(sds value, zlexrangespec *spec);
+int zslLexValueLteMax(sds value, zlexrangespec *spec);
 
 /* Core functions */
 int freeMemoryIfNeeded(void);
@@ -1350,7 +1395,7 @@ void closeListeningSockets(int unlink_unix_socket);
 void updateCachedTime(void);
 void resetServerStats(void);
 unsigned int getLRUClock(void);
-const char *maxmemoryToString(void);
+const char *evictPolicyToString(void);
 
 #define RESTART_SERVER_NONE 0
 #define RESTART_SERVER_GRACEFULLY (1<<0)     /* Do proper shutdown. */
@@ -1372,6 +1417,10 @@ unsigned long setTypeSize(robj *subject);
 void setTypeConvert(robj *subject, int enc);
 
 /* Hash data type */
+#define HASH_SET_TAKE_FIELD (1<<0)
+#define HASH_SET_TAKE_VALUE (1<<1)
+#define HASH_SET_COPY 0
+
 void hashTypeConvert(robj *o, int enc);
 void hashTypeTryConversion(robj *subject, robj **argv, int start, int end);
 void hashTypeTryObjectEncoding(robj *subject, robj **o1, robj **o2);
@@ -1390,6 +1439,7 @@ void hashTypeCurrentObject(hashTypeIterator *hi, int what, unsigned char **vstr,
 sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
 robj *hashTypeLookupWriteOrCreate(client *c, robj *key);
 robj *hashTypeGetValueObject(robj *o, sds field);
+int hashTypeSet(robj *o, sds field, sds value, int flags);
 
 /* Pub / Sub */
 int pubsubUnsubscribeAllChannels(client *c, int notify);
@@ -1669,6 +1719,7 @@ void pfcountCommand(client *c);
 void pfmergeCommand(client *c);
 void pfdebugCommand(client *c);
 void latencyCommand(client *c);
+void moduleCommand(client *c);
 
 #if defined(__GNUC__)
 void *calloc(size_t count, size_t size) __attribute__ ((deprecated));

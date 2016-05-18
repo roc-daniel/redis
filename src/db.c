@@ -116,7 +116,7 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
     sds copy = sdsdup(key->ptr);
     int retval = dictAdd(db->dict, copy, val);
 
-    serverAssertWithInfo(NULL,key,retval == C_OK);
+    serverAssertWithInfo(NULL,key,retval == DICT_OK);
     if (val->type == OBJ_LIST) signalListAsReady(db, key);
     if (server.cluster_enabled) slotToKeyAdd(key);
  }
@@ -1124,7 +1124,9 @@ int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, in
  * This function uses the command table if a command-specific helper function
  * is not required, otherwise it calls the command-specific function. */
 int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
-    if (cmd->getkeys_proc) {
+    if (cmd->flags & CMD_MODULE_GETKEYS) {
+        return moduleGetCommandKeysViaAPI(cmd,argv,argc,numkeys);
+    } else if (!(cmd->flags & CMD_MODULE) && cmd->getkeys_proc) {
         return cmd->getkeys_proc(cmd,argv,argc,numkeys);
     } else {
         return getKeysUsingCommandTable(cmd,argv,argc,numkeys);
